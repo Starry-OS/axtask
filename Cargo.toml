@@ -9,6 +9,14 @@ homepage = "https://github.com/rcore-os/arceos"
 repository = "https://github.com/rcore-os/arceos/tree/main/modules/axtask"
 documentation = "https://rcore-os.github.io/arceos/axtask/index.html"
 
+[patch."https://github.com/Starry-OS/axhal.git".axhal]
+git = "https://github.com/Starry-OS//axhal.git"
+branch = "microkernel"
+
+[patch."https://github.com/Starry-OS/taskctx.git".taskctx]
+git = "https://github.com/Starry-OS//taskctx.git"
+branch = "microkernel"
+
 [features]
 default = []
 
@@ -27,6 +35,7 @@ sched_cfs = ["multitask", "preempt"]
 test = ["percpu?/sp-naive"]
 
 monolithic = ["multitask", "axhal/monolithic", "taskctx/monolithic"]
+microkernel = ["multitask", "axhal/microkernel", "taskctx/microkernel"]
 
 [dependencies]
 cfg-if = "1.0"

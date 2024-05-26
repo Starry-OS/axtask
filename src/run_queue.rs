@@ -1,7 +1,7 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
-#[cfg(feature = "monolithic")]
+#[cfg(any(feature = "monolithic", feature = "microkernel"))]
 use axhal::KERNEL_PROCESS_ID;
 use lazy_init::LazyInit;
 use scheduler::BaseScheduler;
@@ -120,7 +120,7 @@ impl AxRunQueue {
         unreachable!("task exited!");
     }
 
-    #[cfg(feature = "monolithic")]
+    #[cfg(any(feature = "monolithic", feature = "microkernel"))]
     /// 仅用于exec与exit时清除其他后台线程
     pub fn remove_task(&mut self, task: &AxTaskRef) {
         debug!("task remove: {}", task.id_name());
@@ -313,7 +313,7 @@ pub(crate) fn init() {
     IDLE_TASK.with_current(|i| i.init_by(idle_task.clone()));
 
     let main_task = new_init_task("main".into());
-    #[cfg(feature = "monolithic")]
+    #[cfg(any(feature = "monolithic", feature = "microkernel"))]
     main_task.set_process_id(KERNEL_PROCESS_ID);
     main_task.set_state(TaskState::Running);
 
