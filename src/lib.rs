@@ -36,7 +36,7 @@ cfg_if::cfg_if! {
         extern crate alloc;
 
         mod run_queue;
-        pub use run_queue::{IDLE_TASK, RUN_QUEUE, EXITED_TASKS};
+        pub use run_queue::{IDLE_TASK, EXITED_TASKS};
         mod task;
 
         mod schedule;

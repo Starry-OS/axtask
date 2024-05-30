@@ -8,13 +8,12 @@ use scheduler::BaseScheduler;
 use spinlock::SpinNoIrq;
 use taskctx::TaskState;
 
-use crate::schedule::notify_wait_for_exit;
 use crate::task::{new_init_task, new_task, CurrentTask};
 use crate::{AxTaskRef, Scheduler, WaitQueue};
 
 // TODO: per-CPU
 /// The running task-queue of the kernel.
-pub static RUN_QUEUE: LazyInit<SpinNoIrq<AxRunQueue>> = LazyInit::new();
+static RUN_QUEUE: LazyInit<SpinNoIrq<AxRunQueue>> = LazyInit::new();
 
 // TODO: per-CPU
 /// The exited task-queue of the kernel.
@@ -29,6 +28,226 @@ pub static IDLE_TASK: LazyInit<AxTaskRef> = LazyInit::new();
 /// The struct to define the running task-queue of the kernel.
 pub struct AxRunQueue {
     scheduler: Scheduler,
+}
+
+//
+// task state: Ready --- Running --- Blocking ----- Blocked ---- EXITED
+// Concurrency note: 
+//  - Blocked/Exited: Always triggered by task self
+//  - Running: always happend when task is scheduled 
+//  - Ready: 
+//      Blocked to Ready: There may be concurrency
+//      Running to Ready: no concurrency
+//
+// There are several events that trigger State Change:
+//  - task_yield: 
+//  - task_exit: 
+//  - task_block: 
+//  - task_wake: Only this event will occur concurrently with other events
+// 
+//                          task_yield VS task_wake
+// --------------------------------------------------------------------
+//  CPU0               CPU1                     CPU2     
+// task_yield:        task_wake:               task_wake  
+//                    Running do noting
+// Running -> Ready                             
+//                                            Ready do nothing
+// reschedule: 
+// rq.lock().add()
+// --------------------------------------------------------------------
+//                          task_exit VS task_wake
+// --------------------------------------------------------------------
+//  CPU0               CPU1                     CPU2     
+// task_exit:         task_wake:               task_wake  
+//                    Running do noting         
+// Running -> Exit                             
+//                                            Exit  do nothing
+// --------------------------------------------------------------------
+//                          task_block VS task_wake
+// NOTE: 
+// The situation here is a bit complicated. When the task is ready to block, 
+// a timer or waiting queue will be added externally. 
+// If the wakeup is skipped directly, it may cause the blocked task to never wake up
+//
+// By adding new field to the task: wake_cnt:atomic, 
+// when waking up and do_nothing increase wake_cnt;
+// and reuse Rq.lock protect process
+// --------------------------------------------------------------------
+//  CPU0                 CPU1                       CPU2
+// wake_cnt=0
+// task_block:         task_wake:                 task_wake 
+//                     rq.lock()                
+//                    Running do noting
+//                     wake_cnt++ 
+//                     rq.unlock()                
+//                                                rq.lock()
+//                                               Running do_nothing 
+//                                                 wake_cnt++ 
+//                                                rq.unlock()
+// rq.lock()                
+// if wake_cnt > 0  
+//  wakecnt = 0
+//  return
+// rq.unlock()
+// ------------------------------------------------------------------
+//  CPU0                   CPU1                     CPU2
+// wake_cnt=0
+// task_block:           task_wake:                task_wake 
+// 
+// rq.lock()
+// Running -> Blocked 
+// rq.rescuedule()
+// rq.unlock() 
+//                      rq.lock()
+//                      Blocked->Ready 
+//                      rq.add()
+//                      rq.unlock()
+//                                                  rq.lock()
+//                                                  ready do_nothing()
+//
+
+pub(crate) unsafe fn force_unlock() {
+    RUN_QUEUE.force_unlock()
+}
+
+pub(crate) fn add_task(task: AxTaskRef) {
+    debug!("task spawn: {}", task.id_name());
+    assert!(task.is_ready());
+    RUN_QUEUE.lock().scheduler.add_task(task);
+}
+
+pub(crate) fn exit_current(exit_code: i32) -> ! {
+    let curr = crate::current();
+    debug!("task exit: {}, exit_code={}", curr.id_name(), exit_code);
+    assert!(curr.is_running());
+    assert!(!curr.is_idle());
+
+    curr.set_state(TaskState::Exited);
+    // maybe others join on this thread
+    // must set state before notify wait_exit
+    crate::schedule::notify_wait_for_exit(curr.as_task_ref());
+    gc_clear(curr.as_task_ref());
+
+    if curr.is_init() {
+        EXITED_TASKS.lock().clear();
+        axhal::misc::terminate();
+    } else {
+        curr.set_exit_code(exit_code);
+        RUN_QUEUE.lock().resched(false);
+    }
+    unreachable!("task exited!");
+}
+
+pub(crate) fn yield_current() {
+    let curr = crate::current();
+    trace!("task yield: {}", curr.id_name());
+    assert!(curr.is_running());
+    curr.set_state(TaskState::Ready);
+    RUN_QUEUE.lock().resched(false);
+}
+
+/// schedule to next,and try to set current state is blocked
+pub fn block_current() {
+    let curr = crate::current();
+    assert!(!curr.is_idle());
+    assert!(curr.is_running());
+    debug!("task block: {}", curr.id_name());
+    let mut rq = RUN_QUEUE.lock();
+    if curr.wakeup_cnt() > 0 {
+        return;
+    }
+    // we must not block current task with preemption disabled.
+    #[cfg(feature = "preempt")]
+    assert!(curr.can_preempt(1));
+    curr.set_state(TaskState::Blocked);
+    rq.resched(false);
+}
+
+pub fn wake_task(task: AxTaskRef, resched: bool) {
+    debug!("task unblock: {}", task.id_name());
+    let mut rq = RUN_QUEUE.lock();
+    if task.is_blocked() {
+        task.set_state(TaskState::Ready);
+        rq.scheduler.add_task(task); 
+        if resched {
+            #[cfg(feature = "preempt")]
+            crate::current().set_preempt_pending(true);
+        }
+    } else if task.is_running() {
+        task.inc_wakeup_cnt();
+    }
+}
+
+#[cfg(feature = "irq")]
+pub fn schedule_timeout(deadline: axhal::time::TimeValue) -> bool {
+    let curr = crate::current();
+    debug!("task sleep: {}, deadline={:?}", curr.id_name(), deadline);
+    assert!(curr.is_running());
+    assert!(!curr.is_idle());
+
+    curr.reset_wakeup_cnt();
+
+    crate::timers::set_alarm_wakeup(deadline, curr.clone());
+    block_current();
+    let timeout = axhal::time::current_time() >= deadline;
+    // may wake up by others 
+    crate::timers::cancel_alarm(curr.as_task_ref());
+    timeout 
+}
+
+// A hack api
+// thread can exit only by it self
+#[cfg(feature = "monolithic")]
+/// 仅用于exec与exit时清除其他后台线程
+pub fn remove_task(task: &AxTaskRef) {
+    debug!("task remove: {}", task.id_name());
+    // 当前任务不予清除
+    assert!(!task.is_running());
+    assert!(!task.is_idle());
+    if task.is_ready() {
+        task.set_state(TaskState::Exited);
+        gc_clear(task);
+        RUN_QUEUE.lock().scheduler.remove_task(task);
+    }
+}
+#[cfg(feature = "preempt")]
+pub fn preempt_resched() {
+    let curr = crate::current();
+    assert!(curr.is_running());
+
+    // When we get the mutable reference of the run queue, we must
+    // have held the `SpinNoIrq` lock with both IRQs and preemption
+    // disabled. So we need to set `current_disable_count` to 1 in
+    // `can_preempt()` to obtain the preemption permission before
+    //  locking the run queue.
+    let can_preempt = curr.can_preempt(1);
+
+    debug!(
+        "current task is to be preempted: {}, allow={}",
+        curr.id_name(),
+        can_preempt
+    );
+
+    if can_preempt {
+        curr.set_state(TaskState::Ready);
+        RUN_QUEUE.lock().resched(true);
+    } else {
+        curr.set_preempt_pending(true);
+    }
+}
+
+#[cfg(feature = "irq")]
+pub fn scheduler_timer_tick() {
+    let curr = crate::current();
+    if !curr.is_idle() && RUN_QUEUE.lock().scheduler.task_tick(curr.as_task_ref()) {
+        #[cfg(feature = "preempt")]
+        curr.set_preempt_pending(true);
+    }
+}
+
+pub fn set_current_priority(prio: isize) -> bool {
+    RUN_QUEUE.lock().scheduler
+        .set_priority(crate::current().as_task_ref(), prio)
 }
 
 impl AxRunQueue {
@@ -48,146 +267,14 @@ impl AxRunQueue {
         scheduler.add_task(gc_task);
         SpinNoIrq::new(Self { scheduler })
     }
-
-    pub fn add_task(&mut self, task: AxTaskRef) {
-        debug!("task spawn: {}", task.id_name());
-        assert!(task.is_ready());
-        self.scheduler.add_task(task);
-    }
-
-    #[cfg(feature = "irq")]
-    pub fn scheduler_timer_tick(&mut self) {
-        let curr = crate::current();
-        if !curr.is_idle() && self.scheduler.task_tick(curr.as_task_ref()) {
-            #[cfg(feature = "preempt")]
-            curr.set_preempt_pending(true);
-        }
-    }
-
-    pub fn yield_current(&mut self) {
-        let curr = crate::current();
-        trace!("task yield: {}", curr.id_name());
-        assert!(curr.is_running());
-        self.resched(false);
-    }
-
-    pub fn set_current_priority(&mut self, prio: isize) -> bool {
-        self.scheduler
-            .set_priority(crate::current().as_task_ref(), prio)
-    }
-
-    #[cfg(feature = "preempt")]
-    pub fn preempt_resched(&mut self) {
-        let curr = crate::current();
-        assert!(curr.is_running());
-
-        // When we get the mutable reference of the run queue, we must
-        // have held the `SpinNoIrq` lock with both IRQs and preemption
-        // disabled. So we need to set `current_disable_count` to 1 in
-        // `can_preempt()` to obtain the preemption permission before
-        //  locking the run queue.
-        let can_preempt = curr.can_preempt(1);
-
-        debug!(
-            "current task is to be preempted: {}, allow={}",
-            curr.id_name(),
-            can_preempt
-        );
-        if can_preempt {
-            self.resched(true);
-        } else {
-            curr.set_preempt_pending(true);
-        }
-    }
-
-    pub fn exit_current(&mut self, exit_code: i32) -> ! {
-        let curr = crate::current();
-        debug!("task exit: {}, exit_code={}", curr.id_name(), exit_code);
-        assert!(curr.is_running());
-        assert!(!curr.is_idle());
-        if curr.is_init() {
-            EXITED_TASKS.lock().clear();
-            axhal::misc::terminate();
-        } else {
-            curr.set_state(TaskState::Exited);
-            curr.set_exit_code(exit_code);
-            // curr.notify_exit(exit_code, self);
-            notify_wait_for_exit(curr.as_task_ref(), self);
-            EXITED_TASKS.lock().push_back(curr.clone());
-            WAIT_FOR_EXIT.notify_one_locked(false, self);
-            self.resched(false);
-        }
-        unreachable!("task exited!");
-    }
-
-    #[cfg(feature = "monolithic")]
-    /// 仅用于exec与exit时清除其他后台线程
-    pub fn remove_task(&mut self, task: &AxTaskRef) {
-        debug!("task remove: {}", task.id_name());
-        // 当前任务不予清除
-        // assert!(!task.is_running());
-        assert!(!task.is_running());
-        assert!(!task.is_idle());
-        if task.is_ready() {
-            task.set_state(TaskState::Exited);
-            EXITED_TASKS.lock().push_back(task.clone());
-            self.scheduler.remove_task(task);
-        }
-    }
-
-    pub fn block_current<F>(&mut self, wait_queue_push: F)
-    where
-        F: FnOnce(AxTaskRef),
-    {
-        let curr = crate::current();
-        debug!("task block: {}", curr.id_name());
-        assert!(curr.is_running());
-        assert!(!curr.is_idle());
-
-        // we must not block current task with preemption disabled.
-        #[cfg(feature = "preempt")]
-        assert!(curr.can_preempt(1));
-
-        curr.set_state(TaskState::Blocked);
-        wait_queue_push(curr.clone());
-        self.resched(false);
-    }
-
-    pub fn unblock_task(&mut self, task: AxTaskRef, resched: bool) {
-        debug!("task unblock: {}", task.id_name());
-        if task.is_blocked() {
-            task.set_state(TaskState::Ready);
-            self.scheduler.add_task(task); // TODO: priority
-            if resched {
-                #[cfg(feature = "preempt")]
-                crate::current().set_preempt_pending(true);
-            }
-        }
-    }
-
-    #[cfg(feature = "irq")]
-    pub fn sleep_until(&mut self, deadline: axhal::time::TimeValue) {
-        let curr = crate::current();
-        debug!("task sleep: {}, deadline={:?}", curr.id_name(), deadline);
-        assert!(curr.is_running());
-        assert!(!curr.is_idle());
-
-        let now = axhal::time::current_time();
-        if now < deadline {
-            crate::timers::set_alarm_wakeup(deadline, curr.clone());
-            curr.set_state(TaskState::Blocked);
-            self.resched(false);
-        }
-    }
 }
 
 impl AxRunQueue {
-    /// Common reschedule subroutine. If `preempt`, keep current task's time
-    /// slice, otherwise reset it.
+    /// Common reschedule subroutine. 
+    /// If `preempt`, keep current task's time slice, otherwise reset it.
     fn resched(&mut self, preempt: bool) {
         let prev = crate::current();
-        if prev.is_running() {
-            prev.set_state(TaskState::Ready);
+        if prev.is_ready() {
             if !prev.is_idle() {
                 self.scheduler.put_prev_task(prev.clone(), preempt);
             }
@@ -259,7 +346,9 @@ impl AxRunQueue {
 
             // The strong reference count of `prev_task` will be decremented by 1,
             // but won't be dropped until `gc_entry()` is called.
-            assert!(Arc::strong_count(prev_task.as_task_ref()) > 1);
+            assert!(Arc::strong_count(prev_task.as_task_ref()) > 1, 
+                "task id {} strong count {}", prev_task.id().as_u64(),Arc::strong_count(prev_task.as_task_ref()));
+
             assert!(Arc::strong_count(&next_task) >= 1);
             #[cfg(feature = "monolithic")]
             {
@@ -275,6 +364,12 @@ impl AxRunQueue {
     }
 }
 
+pub(crate) fn gc_clear(task: &AxTaskRef) {
+    EXITED_TASKS.lock().push_back(task.clone());
+    error!("task {} enter gc_clear, strong count {}", task.id().as_u64(), Arc::strong_count(task));
+    WAIT_FOR_EXIT.notify_one(false);
+}
+
 fn gc_entry() {
     loop {
         // Drop all exited tasks and recycle resources.
@@ -283,8 +378,11 @@ fn gc_entry() {
             // Do not do the slow drops in the critical section.
             let task = EXITED_TASKS.lock().pop_front();
             if let Some(task) = task {
+                error!("enter gc ,get task id  {} ,  {} ", task.id().as_u64(),
+                    Arc::strong_count(&task));
                 if Arc::strong_count(&task) == 1 {
                     // If I'm the last holder of the task, drop it immediately.
+                    error!("task {} is dropped",task.id().as_u64());
                     drop(task);
                 } else {
                     // Otherwise (e.g, `switch_to` is not compeleted, held by the
@@ -293,6 +391,7 @@ fn gc_entry() {
                 }
             }
         }
+        // gc wait other task exit
         WAIT_FOR_EXIT.wait();
     }
 }

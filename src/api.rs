@@ -5,8 +5,6 @@ use alloc::{string::String, sync::Arc};
 use axhal::KERNEL_PROCESS_ID;
 use taskctx::TaskState;
 
-pub(crate) use crate::run_queue::{AxRunQueue, RUN_QUEUE};
-
 use crate::schedule::get_wait_for_exit_queue;
 #[doc(cfg(feature = "multitask"))]
 pub use crate::task::{new_task, CurrentTask, TaskId, TaskInner};
@@ -69,7 +67,7 @@ pub fn init_scheduler_secondary() {
 #[doc(cfg(feature = "irq"))]
 pub fn on_timer_tick() {
     crate::timers::check_events();
-    RUN_QUEUE.lock().scheduler_timer_tick();
+    crate::run_queue::scheduler_timer_tick();
 }
 
 #[cfg(feature = "preempt")]
@@ -77,9 +75,8 @@ pub fn on_timer_tick() {
 pub fn current_check_preempt_pending() {
     let curr = crate::current();
     if curr.get_preempt_pending() && curr.can_preempt(0) {
-        let mut rq = crate::RUN_QUEUE.lock();
         if curr.get_preempt_pending() {
-            rq.preempt_resched();
+            crate::run_queue::preempt_resched();
         }
     }
 }
@@ -102,7 +99,7 @@ where
         #[cfg(feature = "monolithic")]
         false,
     );
-    RUN_QUEUE.lock().add_task(task.clone());
+    crate::run_queue::add_task(task.clone());
     task
 }
 
@@ -129,13 +126,13 @@ where
 ///
 /// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
 pub fn set_priority(prio: isize) -> bool {
-    RUN_QUEUE.lock().set_current_priority(prio)
+    crate::run_queue::set_current_priority(prio)
 }
 
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
 pub fn yield_now() {
-    RUN_QUEUE.lock().yield_current();
+    crate::run_queue::yield_current();
 }
 
 /// Current task is going to sleep for the given duration.
@@ -150,7 +147,7 @@ pub fn sleep(dur: core::time::Duration) {
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
 pub fn sleep_until(deadline: axhal::time::TimeValue) {
     #[cfg(feature = "irq")]
-    RUN_QUEUE.lock().sleep_until(deadline);
+    crate::run_queue::schedule_timeout(deadline);
     #[cfg(not(feature = "irq"))]
     axhal::time::busy_wait_until(deadline);
 }
@@ -159,6 +156,8 @@ pub fn sleep_until(deadline: axhal::time::TimeValue) {
 ///
 /// If the given task is already exited, it will return immediately.
 pub fn join(task: &AxTaskRef) -> Option<i32> {
+    let curr = crate::current();
+    error!("task {} enter join wait task {} ", curr.id().as_u64(), task.id().as_u64());
     get_wait_for_exit_queue(task)
         .map(|wait_queue| wait_queue.wait_until(|| task.state() == TaskState::Exited));
     Some(task.get_exit_code())
@@ -183,7 +182,7 @@ pub fn wake_vfork_process(task: &AxTaskRef) {
 
 /// Exits the current task.
 pub fn exit(exit_code: i32) -> ! {
-    RUN_QUEUE.lock().exit_current(exit_code)
+    crate::run_queue::exit_current(exit_code)
 }
 
 /// The idle task routine.

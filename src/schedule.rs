@@ -4,7 +4,7 @@ use alloc::{
 };
 use spinlock::SpinNoIrq;
 
-use crate::{AxRunQueue, AxTaskRef, WaitQueue};
+use crate::{AxTaskRef, WaitQueue};
 
 /// A map to store tasks' wait queues, which stores tasks that are waiting for this task to exit.
 pub(crate) static WAIT_FOR_TASK_EXITS: SpinNoIrq<BTreeMap<u64, Arc<WaitQueue>>> =
@@ -22,8 +22,8 @@ pub(crate) fn get_wait_for_exit_queue(task: &AxTaskRef) -> Option<Arc<WaitQueue>
 
 /// When the task exits, notify all tasks that are waiting for this task to exit, and
 /// then remove the wait queue of the exited task.
-pub(crate) fn notify_wait_for_exit(task: &AxTaskRef, rq: &mut AxRunQueue) {
+pub(crate) fn notify_wait_for_exit(task: &AxTaskRef) {
     if let Some(wait_queue) = WAIT_FOR_TASK_EXITS.lock().remove(&task.id().as_u64()) {
-        wait_queue.notify_all_locked(true, rq);
+        wait_queue.notify_all(true);
     }
 }

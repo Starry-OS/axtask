@@ -4,9 +4,7 @@ use lazy_init::LazyInit;
 use spinlock::SpinNoIrq;
 use timer_list::{TimeValue, TimerEvent, TimerList};
 
-use crate::{
-    AxTaskRef, RUN_QUEUE,
-};
+use crate::AxTaskRef;
 
 // TODO: per-CPU
 static TIMER_LIST: LazyInit<SpinNoIrq<TimerList<TaskWakeupEvent>>> = LazyInit::new();
@@ -15,7 +13,7 @@ struct TaskWakeupEvent(AxTaskRef);
 
 impl TimerEvent for TaskWakeupEvent {
     fn callback(self, _now: TimeValue) {
-        RUN_QUEUE.lock().unblock_task(self.0, true);
+        crate::run_queue::wake_task(self.0, true);
     }
 }
 
