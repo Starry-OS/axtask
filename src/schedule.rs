@@ -2,10 +2,22 @@ use alloc::{collections::BTreeMap, sync::Arc};
 
 use core::mem::ManuallyDrop;
 
-use crate::processor::{current_processor, PrevCtxSave, Processor};
-use crate::task::{CurrentTask, TaskState};
+#[cfg(not(feature = "async"))]
+use {
+    crate::processor::PrevCtxSave,
+    crate::task::CurrentTask,
+    spinlock::SpinNoIrqOnlyGuard,
+};
+use crate::processor::{current_processor, Processor};
+use crate::task::TaskState;
 use crate::{AxTaskRef, WaitQueue};
-use spinlock::{SpinNoIrq, SpinNoIrqOnlyGuard};
+use spinlock::SpinNoIrq;
+
+#[cfg(feature = "async")]
+use core::{future::poll_fn, task::Poll};
+
+#[cfg(feature = "async")]
+pub use crate::task_switch::switch_entry as schedule;
 
 /// A map to store tasks' wait queues, which stores tasks that are waiting for this task to exit.
 pub(crate) static WAIT_FOR_TASK_EXITS: SpinNoIrq<BTreeMap<u64, Arc<WaitQueue>>> =
@@ -49,6 +61,7 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
     unreachable!("task exited!");
 }
 
+#[cfg(not(feature = "async"))]
 pub(crate) fn yield_current() {
     let curr = crate::current();
     assert!(curr.is_runable());
@@ -56,6 +69,7 @@ pub(crate) fn yield_current() {
     schedule();
 }
 
+#[cfg(not(feature = "async"))]
 #[cfg(feature = "irq")]
 pub fn schedule_timeout(deadline: axhal::time::TimeValue) -> bool {
     let curr = crate::current();
@@ -100,11 +114,13 @@ pub fn wakeup_task(task: AxTaskRef) {
     ManuallyDrop::into_inner(state);
 }
 
+#[cfg(not(feature = "async"))]
 pub fn schedule() {
     let next_task = current_processor().pick_next_task();
     switch_to(next_task);
 }
 
+#[cfg(not(feature = "async"))]
 fn switch_to(mut next_task: AxTaskRef) {
     let prev_task = crate::current();
 
@@ -208,4 +224,46 @@ fn switch_to(mut next_task: AxTaskRef) {
 
         current_processor().switch_post();
     }
+}
+
+#[cfg(feature = "async")]
+pub(crate) async fn yield_current() {
+    let curr = crate::current();
+    assert!(curr.is_runable());
+    trace!("task yield: {}", curr.id_name());
+    yield_helper().await;
+}
+
+#[cfg(feature = "async")]
+pub(crate) async fn yield_helper() {
+    let mut flag = false;
+    poll_fn(|_cx| {
+        flag = !flag;
+        if flag {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    }).await;
+}
+
+#[cfg(feature = "async")]
+#[cfg(feature = "irq")]
+pub async fn schedule_timeout(deadline: axhal::time::TimeValue) -> bool {
+    let curr = crate::current();
+    debug!("task sleep: {}, deadline={:?}", curr.id_name(), deadline);
+    assert!(!curr.is_idle());
+    crate::timers::set_alarm_wakeup(deadline, curr.clone());
+    let mut flag = false;
+    poll_fn(|_cx| {
+        flag = !flag;
+        if flag {
+            Poll::Pending
+        } else {
+            let timeout = axhal::time::current_time() >= deadline;
+            // may wake up by others
+            crate::timers::cancel_alarm(curr.as_task_ref());
+            Poll::Ready(timeout)
+        }
+    }).await
 }

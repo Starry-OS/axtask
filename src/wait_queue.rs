@@ -1,5 +1,6 @@
 #[cfg(feature = "irq")]
 use crate::schedule::schedule_timeout;
+#[cfg(not(feature = "async"))]
 use crate::schedule::schedule;
 use spinlock::SpinNoIrq;
 use crate::wait_list::WaitTaskList;
@@ -68,6 +69,8 @@ impl WaitQueue {
     // schedule()
     // queue.lock().remove(curr)
     //
+
+    #[cfg(not(feature = "async"))]
     /// Blocks the current task and put it into the wait queue, until other task
     /// notifies it.
     pub fn wait(&self) {
@@ -81,6 +84,7 @@ impl WaitQueue {
         self.queue.lock().remove(&waiter);
     }
 
+    #[cfg(not(feature = "async"))]
     /// Blocks the current task and put it into the wait queue, until the given
     /// `condition` becomes true.
     ///
@@ -105,6 +109,7 @@ impl WaitQueue {
         self.queue.lock().remove(&waiter);
     }
 
+    #[cfg(not(feature = "async"))]
     /// Blocks the current task and put it into the wait queue, until other tasks
     /// notify it, or the given duration has elapsed.
     #[cfg(feature = "irq")]
@@ -120,6 +125,7 @@ impl WaitQueue {
         timeout
     }
 
+    #[cfg(not(feature = "async"))]
     /// Blocks the current task and put it into the wait queue, until the given
     /// `condition` becomes true, or the given duration has elapsed.
     ///
@@ -163,5 +169,109 @@ impl WaitQueue {
     /// Wakes all tasks in the wait queue.
     pub fn notify_all(&self) {
         self.queue.lock().notify_all()
+    }
+}
+
+#[cfg(feature = "async")]
+use crate::schedule::yield_helper;
+
+#[cfg(feature = "async")]
+impl WaitQueue {
+
+    // CPU0 wait                CPU1 notify           CPU2 signal
+    // q.lock()
+    // task.lock()
+    // task.state = blocking
+    // task.unlock()
+    // q.unlock()
+    //                          q.lock()
+    //                          task = q.get;
+    //                          wakeup(task)
+    //                            task == blocking
+    //                              task = runable
+    //                          q.unlock()
+    // schedule()
+    // queue.lock().remove(curr)
+    //
+    /// Blocks the current task and put it into the wait queue, until other task
+    /// notifies it.
+    pub async fn wait(&self) {
+        declare_wait!(waiter);
+        self.queue.lock().prepare_to_wait(waiter.clone());
+        yield_helper().await;
+
+        // maybe wakeup by signal or others, try to delete again
+        // 1. starry support UNINTERRUPT mask, no need to check
+        // 2. starry support INTERRUPTABLE mask, still need to check
+        self.queue.lock().remove(&waiter);
+    }
+
+    /// Blocks the current task and put it into the wait queue, until the given
+    /// `condition` becomes true.
+    ///
+    /// Note that even other tasks notify this task, it will not wake up until
+    /// the condition becomes true.
+    pub async fn wait_until<F>(&self, condition: F)
+    where
+        F: Fn() -> bool,
+    {
+        declare_wait!(waiter);
+        loop {
+            if condition() {
+                break;
+            }
+            // maybe wakeup by signal or others, should check before push
+            // wait_list will do check
+            self.queue.lock().prepare_to_wait(waiter.clone());
+            yield_helper().await;
+        }
+
+        //maybe wakeup by signal or others, try to delete again
+        self.queue.lock().remove(&waiter);
+    }
+
+    /// Blocks the current task and put it into the wait queue, until other tasks
+    /// notify it, or the given duration has elapsed.
+    #[cfg(feature = "irq")]
+    pub async fn wait_timeout(&self, dur: core::time::Duration) -> bool {
+        declare_wait!(waiter);
+        let deadline = axhal::time::current_time() + dur;
+
+        self.queue.lock().prepare_to_wait(waiter.clone());
+        let timeout = schedule_timeout(deadline).await;
+
+        //maybe wakeup by timer or signal, try to delete again
+        self.queue.lock().remove(&waiter);
+        timeout
+    }
+
+    /// Blocks the current task and put it into the wait queue, until the given
+    /// `condition` becomes true, or the given duration has elapsed.
+    ///
+    /// Note that even other tasks notify this task, it will not wake up until
+    /// the above conditions are met.
+    #[cfg(feature = "irq")]
+    pub async fn wait_timeout_until<F>(&self, dur: core::time::Duration, condition: F) -> bool
+    where
+        F: Fn() -> bool,
+    {
+        declare_wait!(waiter);
+        let deadline = axhal::time::current_time() + dur;
+        let mut timeout = false;
+        loop {
+            if condition() {
+                break;
+            }
+            //maybe wakeup by signal or others, should check before push
+            self.queue.lock().prepare_to_wait(waiter.clone());
+            timeout = schedule_timeout(deadline).await;
+            if timeout {
+                break;
+            }
+        }
+
+        //maybe wakeup by timer or signal, try to delete again
+        self.queue.lock().remove(&waiter);
+        timeout
     }
 }

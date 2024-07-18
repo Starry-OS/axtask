@@ -13,6 +13,12 @@ use crate::task::{new_init_task, new_task, CurrentTask, TaskState};
 
 use crate::{AxTaskRef, Scheduler, WaitQueue};
 
+#[cfg(feature = "async")]
+use crate::{
+    stack_pool::{StackPool, TaskStack},
+    task_switch::CurrentFreeStack,
+};
+
 static PROCESSORS: SpinNoIrqOnly<VecDeque<&'static Processor>> =
     SpinNoIrqOnly::new(VecDeque::new());
 
@@ -34,6 +40,8 @@ pub struct Processor {
     idle_task: AxTaskRef,
     /// The gc task of the processor
     gc_task: AxTaskRef,
+    #[cfg(feature = "async")]
+    stack_pool: SpinNoIrq<StackPool>,
 }
 
 unsafe impl Sync for Processor {}
@@ -41,6 +49,7 @@ unsafe impl Send for Processor {}
 
 impl Processor {
     pub fn new(idle_task: AxTaskRef) -> Self {
+        #[cfg(not(feature = "async"))]
         let gc_task = new_task(
             gc_entry,
             "gc".into(),
@@ -50,7 +59,11 @@ impl Processor {
             #[cfg(feature = "monolithic")]
             0,
         );
-
+        #[cfg(feature = "async")]
+        let gc_task = new_task(
+            move || gc_entry(),
+            "gc".into()
+        );
         Processor {
             scheduler: SpinNoIrq::new(Scheduler::new()),
             idle_task,
@@ -59,6 +72,8 @@ impl Processor {
             gc_wait: WaitQueue::new(),
             task_nr: AtomicUsize::new(0),
             gc_task: gc_task,
+            #[cfg(feature = "async")]
+            stack_pool: SpinNoIrq::new(StackPool::new()),
         }
     }
 
@@ -72,6 +87,7 @@ impl Processor {
         self.gc_wait.notify_one();
     }
 
+    #[cfg(not(feature = "async"))]
     pub(crate) fn clean_task_wait(&self) {
         loop {
             // Drop all exited tasks and recycle resources.
@@ -93,6 +109,31 @@ impl Processor {
             }
             // gc wait other task exit
             self.gc_wait.wait();
+        }
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) async fn clean_task_wait(&self) {
+        loop {
+            // Drop all exited tasks and recycle resources.
+            let n = self.exited_tasks.lock().len();
+            for _ in 0..n {
+                // Do not do the slow drops in the critical section.
+                let task = self.exited_tasks.lock().pop_front();
+                if let Some(task) = task {
+                    if Arc::strong_count(&task) == 1 {
+                        // If I'm the last holder of the task, drop it immediately.
+                        debug!("clean task :{} ", task.id().as_u64());
+                        drop(task);
+                    } else {
+                        // Otherwise (e.g, `switch_to` is not compeleted, held by the
+                        // joiner, etc), push it back and wait for them to drop first.
+                        self.exited_tasks.lock().push_back(task);
+                    }
+                }
+            }
+            // gc wait other task exit
+            self.gc_wait.wait().await;
         }
     }
 
@@ -189,6 +230,21 @@ impl Processor {
             .min_by_key(|p| p.task_nr.load(Ordering::Acquire))
             .unwrap()
     }
+
+    #[cfg(feature = "async")]
+    #[inline]
+    /// Pick a new stack
+    pub fn pick_stack(&self) -> Arc<TaskStack> {
+        self.stack_pool.lock().fetch()
+    }
+
+    #[cfg(feature = "async")]
+    #[inline]
+    /// Pick a new stack
+    pub fn set_curr_stack(&self, stack: Option<Arc<TaskStack>>) {
+        self.stack_pool.lock().set_curr_stack(stack);
+    }
+
 }
 
 pub fn current_processor() -> &'static Processor {
@@ -220,12 +276,21 @@ impl PrevCtxSave {
     }
 }
 
+#[cfg(not(feature = "async"))]
 fn gc_entry() {
     current_processor().clean_task_wait();
 }
 
+#[cfg(feature = "async")]
+async fn gc_entry() -> i32 {
+    current_processor().clean_task_wait().await;
+    0
+}
+
 pub(crate) fn init() {
+    #[cfg(not(feature = "async"))]
     const IDLE_TASK_STACK_SIZE: usize = 4096;
+    #[cfg(not(feature = "async"))]
     let idle_task = new_task(
         || crate::run_idle(),
         "idle".into(), // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
@@ -234,6 +299,11 @@ pub(crate) fn init() {
         KERNEL_PROCESS_ID,
         #[cfg(feature = "monolithic")]
         0,
+    );
+    #[cfg(feature = "async")]
+    let idle_task = new_task(
+        || async { crate::async_run_idle().await; 0},
+        "idle".into(), // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
     );
 
     let main_task = new_init_task("main".into());
@@ -247,12 +317,24 @@ pub(crate) fn init() {
 
     main_task.init_processor(current_processor());
 
-    unsafe { CurrentTask::init_current(main_task) }
+    unsafe { CurrentTask::init_current(main_task); }
+    #[cfg(feature = "async")] {
+        log::info!("init current free stack");
+        let init_free_stack = current_processor().pick_stack();
+        unsafe { CurrentFreeStack::init_current_free(init_free_stack); }
+    }
+    
 }
 
 pub(crate) fn init_secondary() {
     // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
+    #[cfg(not(feature = "async"))]
     let idle_task = new_init_task("idle".into());
+    #[cfg(feature = "async")]
+    let idle_task = new_task(
+        || async { crate::async_run_idle().await; 0},
+        "idle".into(), // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
+    );
     #[cfg(feature = "monolithic")]
     idle_task.set_process_id(KERNEL_PROCESS_ID);
 
@@ -262,4 +344,9 @@ pub(crate) fn init_secondary() {
     PROCESSORS.lock().push_back(current_processor());
 
     unsafe { CurrentTask::init_current(idle_task) };
+    #[cfg(feature = "async")] {
+        log::info!("init current free stack");
+        let init_free_stack = current_processor().pick_stack();
+        unsafe { CurrentFreeStack::init_current_free(init_free_stack); }
+    }
 }

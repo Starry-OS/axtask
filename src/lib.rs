@@ -29,6 +29,7 @@
 #![feature(doc_cfg)]
 #![feature(doc_auto_cfg)]
 #![feature(stmt_expr_attributes)]
+#![feature(naked_functions, asm_const)]
 cfg_if::cfg_if! {
     if #[cfg(feature = "multitask")] {
         #[macro_use]
@@ -53,6 +54,16 @@ cfg_if::cfg_if! {
         #[doc(cfg(feature = "multitask"))]
         pub use self::api::*;
         pub use self::api::{sleep, sleep_until, yield_now};
+
+        #[cfg(feature = "async")]
+        mod waker;
+        #[cfg(feature = "async")]
+        use waker::waker_from_task;
+
+        #[cfg(feature = "async")]
+        mod stack_pool;
+        #[cfg(feature = "async")]
+        mod task_switch;
 
     } else {
         mod api_s;

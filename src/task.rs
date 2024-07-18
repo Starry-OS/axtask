@@ -2,15 +2,19 @@ use alloc::{string::String, sync::Arc};
 
 use core::{mem::ManuallyDrop, ops::Deref};
 
-use alloc::boxed::Box;
+#[cfg(not(feature = "async"))]
+use {
+    alloc::boxed::Box,
+    memory_addr::VirtAddr,
+    crate::current_processor,
+};
 
-use memory_addr::VirtAddr;
-
+#[cfg(not(feature = "async"))]
 #[cfg(feature = "monolithic")]
 use axhal::arch::TrapFrame;
 
 use crate::{
-    current_processor, processor::Processor, schedule::add_wait_for_exit_queue, AxTask, AxTaskRef,
+    processor::Processor, schedule::add_wait_for_exit_queue, AxTask, AxTaskRef,
 };
 
 pub use taskctx::{TaskId, TaskInner};
@@ -27,6 +31,9 @@ extern "C" {
 pub(crate) fn tls_area() -> (usize, usize) {
     (_stdata as usize, _etbss as usize)
 }
+
+#[cfg(feature = "async")]
+use core::future::Future;
 
 /// The possible states of a task.
 #[repr(u8)]
@@ -122,6 +129,7 @@ impl Deref for ScheduleTask {
     }
 }
 
+#[cfg(not(feature = "async"))]
 #[cfg(feature = "monolithic")]
 /// Create a new task.
 ///
@@ -177,6 +185,7 @@ where
     axtask
 }
 
+#[cfg(not(feature = "async"))]
 #[cfg(not(feature = "monolithic"))]
 /// Create a new task.
 ///
@@ -253,6 +262,7 @@ impl CurrentTask {
         self.0.deref().clone()
     }
 
+    #[allow(unused)]
     pub(crate) fn ptr_eq(&self, other: &AxTaskRef) -> bool {
         Arc::ptr_eq(&self.0, other)
     }
@@ -279,6 +289,7 @@ impl Deref for CurrentTask {
     }
 }
 
+#[cfg(not(feature = "async"))]
 extern "C" fn task_entry() -> ! {
     // SAFETY: INIT when switch_to
     // First into task entry, manually perform the subsequent work of switch_to
@@ -312,4 +323,29 @@ extern "C" fn task_entry() -> ! {
     }
     // only for kernel task
     crate::exit(0);
+}
+
+#[cfg(feature = "async")]
+/// Create a new task.
+/// 
+/// Arguments:
+/// - `fut`: The future the task.
+/// - `name`: The name of the task.
+pub fn new_task<F, T>(
+    fut: F,
+    name: String,
+) -> AxTaskRef 
+where 
+    F: FnOnce() -> T,
+    T: Future<Output = i32> + Send + 'static,
+{
+    let task = taskctx::TaskInner::new(
+        fut, 
+        name,
+        #[cfg(feature = "tls")]
+        tls_area(),
+    );
+    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task)));
+    add_wait_for_exit_queue(&axtask);
+    axtask
 }

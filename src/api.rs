@@ -1,6 +1,7 @@
 //! Task APIs for multi-task configuration.
 
 use alloc::{string::String, sync::Arc};
+#[cfg(not(feature = "async"))]
 #[cfg(feature = "monolithic")]
 use axhal::KERNEL_PROCESS_ID;
 
@@ -93,10 +94,14 @@ pub fn current_check_preempt_pending() {
             curr.id_name(),
             curr.can_preempt()
         );
-        crate::schedule::schedule()
+        #[cfg(not(feature = "async"))]
+        crate::schedule::schedule();
+        #[cfg(feature = "async")]
+        crate::task_switch::preempt_switch_entry();
     }
 }
 
+#[cfg(not(feature = "async"))]
 /// Spawns a new task with the given parameters.
 ///
 /// Returns the task reference.
@@ -117,6 +122,7 @@ where
     task
 }
 
+#[cfg(not(feature = "async"))]
 /// Spawns a new task with the default parameters.
 ///
 /// The default task name is an empty string. The default task stack size is
@@ -143,12 +149,14 @@ pub fn set_priority(prio: isize) -> bool {
     crate::schedule::set_current_priority(prio)
 }
 
+#[cfg(not(feature = "async"))]
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
 pub fn yield_now() {
     crate::schedule::yield_current();
 }
 
+#[cfg(not(feature = "async"))]
 /// Current task is going to sleep for the given duration.
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
@@ -156,6 +164,7 @@ pub fn sleep(dur: core::time::Duration) {
     sleep_until(axhal::time::current_time() + dur);
 }
 
+#[cfg(not(feature = "async"))]
 /// Current task is going to sleep, it will be woken up at the given deadline.
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
@@ -165,11 +174,14 @@ pub fn sleep_until(deadline: axhal::time::TimeValue) {
     #[cfg(not(feature = "irq"))]
     axhal::time::busy_wait_until(deadline);
 }
+
 /// wake up task
 pub fn wakeup_task(task: AxTaskRef) {
+    log::debug!("wakeup {}", task.id_name());
     crate::schedule::wakeup_task(task)
 }
 
+#[cfg(not(feature = "async"))]
 /// Current task is going to sleep, it will be woken up when the given task exits.
 ///
 /// If the given task is already exited, it will return immediately.
@@ -179,6 +191,7 @@ pub fn join(task: &AxTaskRef) -> Option<i32> {
     Some(task.get_exit_code())
 }
 
+#[cfg(not(feature = "async"))]
 #[cfg(feature = "monolithic")]
 /// Current task is going to sleep. It will be woken up when the given task does exec syscall or exit.
 pub fn vfork_suspend(task: &AxTaskRef) {
@@ -206,9 +219,119 @@ pub fn exit(exit_code: i32) -> ! {
 /// It runs an infinite loop that keeps calling [`yield_now()`].
 pub fn run_idle() -> ! {
     loop {
+        #[cfg(not(feature = "async"))]
         yield_now();
+        #[cfg(feature = "async")]
+        schedule();
         //debug!("idle task: waiting for IRQs...");
         #[cfg(feature = "irq")]
         axhal::arch::wait_for_irqs();
+    }
+}
+
+#[cfg(feature = "async")]
+/// Current task gives up the CPU time voluntarily, and switches to another
+/// ready task.
+pub async fn yield_now() {
+    crate::schedule::yield_current().await;
+}
+
+#[cfg(feature = "async")]
+/// Current task is going to sleep for the given duration.
+///
+/// If the feature `irq` is not enabled, it uses busy-wait instead.
+pub async fn sleep(dur: core::time::Duration) {
+    sleep_until(axhal::time::current_time() + dur).await;
+}
+
+#[cfg(feature = "async")]
+/// Current task is going to sleep, it will be woken up at the given deadline.
+///
+/// If the feature `irq` is not enabled, it uses busy-wait instead.
+pub async fn sleep_until(deadline: axhal::time::TimeValue) {
+    #[cfg(feature = "irq")]
+    crate::schedule::schedule_timeout(deadline).await;
+    #[cfg(not(feature = "irq"))]
+    axhal::time::busy_wait_until(deadline);
+}
+
+#[cfg(feature = "async")]
+use core::future::Future;
+
+#[cfg(feature = "async")]
+/// Spawns a new task with the given parameters.
+///
+/// Returns the task reference.
+pub fn spawn_raw<F, T>(f: F, name: String) -> AxTaskRef
+where
+    F: FnOnce() -> T,
+    T: core::future::Future<Output = i32> + Send + 'static,
+{
+    let task = new_task(
+        f,
+        name,
+    );
+    Processor::first_add_task(task.clone());
+    task
+}
+
+#[cfg(feature = "async")]
+/// Spawns a new task with the given parameters.
+///
+/// Returns the task reference.
+pub fn spawn<F, T>(f: F) -> AxTaskRef
+where
+    F: FnOnce() -> T,
+    T: core::future::Future<Output = i32> + Send + 'static,
+{
+    spawn_raw(f, "".into())
+}
+
+#[cfg(feature = "async")]
+/// Current task is going to sleep, it will be woken up when the given task exits.
+///
+/// If the given task is already exited, it will return immediately.
+pub async fn join(task: &AxTaskRef) -> Option<i32> {
+    if let Some(wait_queue) = get_wait_for_exit_queue(task) {
+        wait_queue.wait_until(|| task.state() == TaskState::Exited).await;
+    }
+    Some(task.get_exit_code())
+}
+
+#[cfg(feature = "async")]
+#[cfg(feature = "monolithic")]
+/// Current task is going to sleep. It will be woken up when the given task does exec syscall or exit.
+pub async fn vfork_suspend(task: &AxTaskRef) {
+    if let Some(wait_queue) = get_wait_for_exit_queue(task) {
+        wait_queue.wait_until(|| {
+            // If the given task does the exec syscall, it will be the leader of the new process.
+            task.is_leader() || task.state() == TaskState::Exited
+        }).await;   
+    }
+}
+
+#[cfg(feature = "async")]
+/// The idle task routine.
+///
+/// It runs an infinite loop that keeps calling [`yield_now()`].
+pub async fn async_run_idle() -> ! {
+    loop {
+        yield_now().await;
+        //debug!("idle task: waiting for IRQs...");
+        #[cfg(feature = "irq")]
+        axhal::arch::wait_for_irqs();
+    }
+}
+
+#[cfg(feature = "async")]
+/// Run a task to completion
+pub fn block_on<F, T>(f: F, name: alloc::string::String) -> T::Output
+where
+    F: FnOnce() -> T,
+    T: Future<Output = i32> + Send + 'static,
+{
+    spawn_raw(f, name);
+    loop {
+        schedule();
     }
 }
