@@ -83,7 +83,7 @@ pub fn on_timer_tick() {
 /// Checks if the current task should be preempted.
 /// This api called after handle irq,it may be on a
 /// disable_preempt ctx
-pub fn current_check_preempt_pending() {
+pub fn current_check_preempt_pending(taskctx: &mut taskctx::TaskContext) {
     let curr = crate::current();
     // if task is already exited or blocking,
     // no need preempt, they are rescheduling
@@ -97,7 +97,7 @@ pub fn current_check_preempt_pending() {
         #[cfg(not(feature = "async"))]
         crate::schedule::schedule();
         #[cfg(feature = "async")]
-        crate::task_switch::preempt_switch_entry();
+        crate::task_switch::preempt_switch_entry(taskctx);
     }
 }
 

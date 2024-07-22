@@ -2,27 +2,19 @@ use alloc::sync::Arc;
 use spinlock::SpinNoIrqOnlyGuard;
 use core::{mem::ManuallyDrop, ops::Deref, task::Poll};
 use crate::{current_processor, processor::PrevCtxSave, stack_pool::TaskStack, AxTaskRef, CurrentTask, TaskState};
-use taskctx::{save_prev_ctx, load_next_ctx};
+use taskctx::load_next_ctx;
 
 #[cfg(feature = "preempt")]
 /// This is only used when the preempt feature is enabled.
-pub fn preempt_switch_entry() {
+pub fn preempt_switch_entry(taskctx: &mut taskctx::TaskContext) {
     let prev_task = crate::current();
-    let prev_task_ctx_ref = prev_task.get_ctx_ref();
-    unsafe { save_prev_ctx(&mut *prev_task_ctx_ref) };
-    unsafe { *prev_task_ctx_ref = core::ptr::NonNull::dangling() };
+    prev_task.set_ctx_ref(taskctx as _);
+    schedule_with_sp_change();
 }
 
 /// This function is the entrance of activie switching.
 pub fn switch_entry() {
-    // The current task may have not run yet. So 
-    let prev_task = crate::current();
-    if prev_task.is_thread() {
-        let prev_task_ctx_ref = prev_task.get_ctx_ref();
-        unsafe { save_prev_ctx(&mut *prev_task_ctx_ref) };
-    } else {
-        schedule_without_sp_change();
-    }
+    schedule_without_sp_change();
 }
 
 #[no_mangle]
