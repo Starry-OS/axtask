@@ -14,10 +14,7 @@ use crate::task::{new_init_task, new_task, CurrentTask, TaskState};
 use crate::{AxTaskRef, Scheduler, WaitQueue};
 
 #[cfg(feature = "async")]
-use crate::{
-    stack_pool::{StackPool, TaskStack},
-    task_switch::CurrentFreeStack,
-};
+use crate::stack_pool::{StackPool, TaskStack};
 
 static PROCESSORS: SpinNoIrqOnly<VecDeque<&'static Processor>> =
     SpinNoIrqOnly::new(VecDeque::new());
@@ -49,20 +46,13 @@ unsafe impl Send for Processor {}
 
 impl Processor {
     pub fn new(idle_task: AxTaskRef) -> Self {
-        #[cfg(not(feature = "async"))]
         let gc_task = new_task(
-            gc_entry,
+            #[cfg(not(feature = "async"))] gc_entry,
+            #[cfg(feature = "async")] move || gc_entry(),
             "gc".into(),
             axconfig::TASK_STACK_SIZE,
-            #[cfg(feature = "monolithic")]
-            KERNEL_PROCESS_ID,
-            #[cfg(feature = "monolithic")]
-            0,
-        );
-        #[cfg(feature = "async")]
-        let gc_task = new_task(
-            move || gc_entry(),
-            "gc".into()
+            #[cfg(feature = "monolithic")] KERNEL_PROCESS_ID,
+            #[cfg(feature = "monolithic")] 0,
         );
         Processor {
             scheduler: SpinNoIrq::new(Scheduler::new()),
@@ -133,7 +123,7 @@ impl Processor {
                 }
             }
             // gc wait other task exit
-            self.gc_wait.wait().await;
+            self.gc_wait.async_wait().await;
         }
     }
 
@@ -287,23 +277,15 @@ async fn gc_entry() -> i32 {
     0
 }
 
+const IDLE_TASK_STACK_SIZE: usize = 4096;
 pub(crate) fn init() {
-    #[cfg(not(feature = "async"))]
-    const IDLE_TASK_STACK_SIZE: usize = 4096;
-    #[cfg(not(feature = "async"))]
     let idle_task = new_task(
-        || crate::run_idle(),
+        #[cfg(not(feature = "async"))] || crate::run_idle(),
+        #[cfg(feature = "async")] || async { crate::async_run_idle().await; 0},
         "idle".into(), // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
         IDLE_TASK_STACK_SIZE,
-        #[cfg(feature = "monolithic")]
-        KERNEL_PROCESS_ID,
-        #[cfg(feature = "monolithic")]
-        0,
-    );
-    #[cfg(feature = "async")]
-    let idle_task = new_task(
-        || async { crate::async_run_idle().await; 0},
-        "idle".into(), // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
+        #[cfg(feature = "monolithic")] KERNEL_PROCESS_ID,
+        #[cfg(feature = "monolithic")] 0,
     );
 
     let main_task = new_init_task("main".into());
@@ -318,12 +300,6 @@ pub(crate) fn init() {
     main_task.init_processor(current_processor());
 
     unsafe { CurrentTask::init_current(main_task); }
-    #[cfg(feature = "async")] {
-        log::info!("init current free stack");
-        let init_free_stack = current_processor().pick_stack();
-        unsafe { CurrentFreeStack::init_current_free(init_free_stack); }
-    }
-    
 }
 
 pub(crate) fn init_secondary() {
@@ -334,6 +310,9 @@ pub(crate) fn init_secondary() {
     let idle_task = new_task(
         || async { crate::async_run_idle().await; 0},
         "idle".into(), // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
+        IDLE_TASK_STACK_SIZE,
+        #[cfg(feature = "monolithic")] KERNEL_PROCESS_ID,
+        #[cfg(feature = "monolithic")] 0,
     );
     #[cfg(feature = "monolithic")]
     idle_task.set_process_id(KERNEL_PROCESS_ID);
@@ -344,9 +323,4 @@ pub(crate) fn init_secondary() {
     PROCESSORS.lock().push_back(current_processor());
 
     unsafe { CurrentTask::init_current(idle_task) };
-    #[cfg(feature = "async")] {
-        log::info!("init current free stack");
-        let init_free_stack = current_processor().pick_stack();
-        unsafe { CurrentFreeStack::init_current_free(init_free_stack); }
-    }
 }

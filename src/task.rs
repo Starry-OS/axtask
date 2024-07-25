@@ -59,7 +59,7 @@ impl ScheduleTask {
         Self {
             state: SpinNoIrqOnly::new(TaskState::Runable),
             processor: SpinNoIrq::new(None),
-            inner: inner,
+            inner,
         }
     }
 
@@ -334,6 +334,9 @@ extern "C" fn task_entry() -> ! {
 pub fn new_task<F, T>(
     fut: F,
     name: String,
+    stack_size: usize,
+    #[cfg(feature = "monolithic")] process_id: u64,
+    #[cfg(feature = "monolithic")] page_table_token: usize,
 ) -> AxTaskRef 
 where 
     F: FnOnce() -> T,
@@ -344,6 +347,9 @@ where
         name,
         #[cfg(feature = "tls")]
         tls_area(),
+        stack_size,
+        #[cfg(feature = "monolithic")] process_id,
+        #[cfg(feature = "monolithic")] page_table_token,
     );
     let axtask = Arc::new(AxTask::new(ScheduleTask::new(task)));
     add_wait_for_exit_queue(&axtask);

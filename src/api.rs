@@ -1,7 +1,6 @@
 //! Task APIs for multi-task configuration.
 
 use alloc::{string::String, sync::Arc};
-#[cfg(not(feature = "async"))]
 #[cfg(feature = "monolithic")]
 use axhal::KERNEL_PROCESS_ID;
 
@@ -14,8 +13,6 @@ pub use crate::task::{new_task, CurrentTask, TaskId};
 pub use crate::wait_queue::WaitQueue;
 
 pub use crate::processor::{current_processor, Processor};
-
-pub use crate::schedule::schedule;
 
 #[cfg(feature = "irq")]
 pub use crate::schedule::schedule_timeout;
@@ -83,7 +80,7 @@ pub fn on_timer_tick() {
 /// Checks if the current task should be preempted.
 /// This api called after handle irq,it may be on a
 /// disable_preempt ctx
-pub fn current_check_preempt_pending(taskctx: &mut taskctx::TaskContext) {
+pub fn current_check_preempt_pending(_taskctx: &mut taskctx::TaskContext) {
     let curr = crate::current();
     // if task is already exited or blocking,
     // no need preempt, they are rescheduling
@@ -97,7 +94,7 @@ pub fn current_check_preempt_pending(taskctx: &mut taskctx::TaskContext) {
         #[cfg(not(feature = "async"))]
         crate::schedule::schedule();
         #[cfg(feature = "async")]
-        crate::task_switch::preempt_switch_entry(taskctx);
+        crate::task_switch::preempt_switch_entry(_taskctx);
     }
 }
 
@@ -149,14 +146,12 @@ pub fn set_priority(prio: isize) -> bool {
     crate::schedule::set_current_priority(prio)
 }
 
-#[cfg(not(feature = "async"))]
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
 pub fn yield_now() {
     crate::schedule::yield_current();
 }
 
-#[cfg(not(feature = "async"))]
 /// Current task is going to sleep for the given duration.
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
@@ -164,7 +159,6 @@ pub fn sleep(dur: core::time::Duration) {
     sleep_until(axhal::time::current_time() + dur);
 }
 
-#[cfg(not(feature = "async"))]
 /// Current task is going to sleep, it will be woken up at the given deadline.
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
@@ -181,7 +175,6 @@ pub fn wakeup_task(task: AxTaskRef) {
     crate::schedule::wakeup_task(task)
 }
 
-#[cfg(not(feature = "async"))]
 /// Current task is going to sleep, it will be woken up when the given task exits.
 ///
 /// If the given task is already exited, it will return immediately.
@@ -222,7 +215,7 @@ pub fn run_idle() -> ! {
         #[cfg(not(feature = "async"))]
         yield_now();
         #[cfg(feature = "async")]
-        schedule();
+        crate::task_switch::switch_entry();
         //debug!("idle task: waiting for IRQs...");
         #[cfg(feature = "irq")]
         axhal::arch::wait_for_irqs();
@@ -232,25 +225,25 @@ pub fn run_idle() -> ! {
 #[cfg(feature = "async")]
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
-pub async fn yield_now() {
-    crate::schedule::yield_current().await;
+pub async fn async_yield_now() {
+    crate::schedule::async_yield_current().await;
 }
 
 #[cfg(feature = "async")]
 /// Current task is going to sleep for the given duration.
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
-pub async fn sleep(dur: core::time::Duration) {
-    sleep_until(axhal::time::current_time() + dur).await;
+pub async fn async_sleep(dur: core::time::Duration) {
+    async_sleep_until(axhal::time::current_time() + dur).await;
 }
 
 #[cfg(feature = "async")]
 /// Current task is going to sleep, it will be woken up at the given deadline.
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
-pub async fn sleep_until(deadline: axhal::time::TimeValue) {
+pub async fn async_sleep_until(deadline: axhal::time::TimeValue) {
     #[cfg(feature = "irq")]
-    crate::schedule::schedule_timeout(deadline).await;
+    crate::schedule::async_schedule_timeout(deadline).await;
     #[cfg(not(feature = "irq"))]
     axhal::time::busy_wait_until(deadline);
 }
@@ -262,7 +255,7 @@ use core::future::Future;
 /// Spawns a new task with the given parameters.
 ///
 /// Returns the task reference.
-pub fn spawn_raw<F, T>(f: F, name: String) -> AxTaskRef
+pub fn spawn_raw<F, T>(f: F, name: String, stack_size: usize) -> AxTaskRef
 where
     F: FnOnce() -> T,
     T: core::future::Future<Output = i32> + Send + 'static,
@@ -270,6 +263,9 @@ where
     let task = new_task(
         f,
         name,
+        stack_size,
+        #[cfg(feature = "monolithic")] KERNEL_PROCESS_ID,
+        #[cfg(feature = "monolithic")] 0,
     );
     Processor::first_add_task(task.clone());
     task
@@ -284,16 +280,16 @@ where
     F: FnOnce() -> T,
     T: core::future::Future<Output = i32> + Send + 'static,
 {
-    spawn_raw(f, "".into())
+    spawn_raw(f, "".into(), axconfig::TASK_STACK_SIZE)
 }
 
 #[cfg(feature = "async")]
 /// Current task is going to sleep, it will be woken up when the given task exits.
 ///
 /// If the given task is already exited, it will return immediately.
-pub async fn join(task: &AxTaskRef) -> Option<i32> {
+pub async fn async_join(task: &AxTaskRef) -> Option<i32> {
     if let Some(wait_queue) = get_wait_for_exit_queue(task) {
-        wait_queue.wait_until(|| task.state() == TaskState::Exited).await;
+        wait_queue.async_wait_until(|| task.state() == TaskState::Exited).await;
     }
     Some(task.get_exit_code())
 }
@@ -303,7 +299,7 @@ pub async fn join(task: &AxTaskRef) -> Option<i32> {
 /// Current task is going to sleep. It will be woken up when the given task does exec syscall or exit.
 pub async fn vfork_suspend(task: &AxTaskRef) {
     if let Some(wait_queue) = get_wait_for_exit_queue(task) {
-        wait_queue.wait_until(|| {
+        wait_queue.async_wait_until(|| {
             // If the given task does the exec syscall, it will be the leader of the new process.
             task.is_leader() || task.state() == TaskState::Exited
         }).await;   
@@ -316,7 +312,7 @@ pub async fn vfork_suspend(task: &AxTaskRef) {
 /// It runs an infinite loop that keeps calling [`yield_now()`].
 pub async fn async_run_idle() -> ! {
     loop {
-        yield_now().await;
+        async_yield_now().await;
         //debug!("idle task: waiting for IRQs...");
         #[cfg(feature = "irq")]
         axhal::arch::wait_for_irqs();
@@ -330,8 +326,8 @@ where
     F: FnOnce() -> T,
     T: Future<Output = i32> + Send + 'static,
 {
-    spawn_raw(f, name);
+    spawn_raw(f, name, axconfig::TASK_STACK_SIZE);
     loop {
-        schedule();
+        crate::task_switch::switch_entry();
     }
 }

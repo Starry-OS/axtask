@@ -2,7 +2,6 @@ use alloc::{collections::BTreeMap, sync::Arc};
 
 use core::mem::ManuallyDrop;
 
-#[cfg(not(feature = "async"))]
 use {
     crate::processor::PrevCtxSave,
     crate::task::CurrentTask,
@@ -16,8 +15,6 @@ use spinlock::SpinNoIrq;
 #[cfg(feature = "async")]
 use core::{future::poll_fn, task::Poll};
 
-#[cfg(feature = "async")]
-pub use crate::task_switch::switch_entry as schedule;
 
 /// A map to store tasks' wait queues, which stores tasks that are waiting for this task to exit.
 pub(crate) static WAIT_FOR_TASK_EXITS: SpinNoIrq<BTreeMap<u64, Arc<WaitQueue>>> =
@@ -61,15 +58,23 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
     unreachable!("task exited!");
 }
 
-#[cfg(not(feature = "async"))]
 pub(crate) fn yield_current() {
-    let curr = crate::current();
-    assert!(curr.is_runable());
-    trace!("task yield: {}", curr.id_name());
-    schedule();
+    #[cfg(not(feature = "async"))]
+    {
+        let curr = crate::current();
+        assert!(curr.is_runable());
+        trace!("task yield: {}", curr.id_name());
+        schedule();
+    }
+    #[cfg(feature = "async")]
+    {
+        let curr = crate::current();
+        assert!(curr.is_runable());
+        trace!("task yield: {}", curr.id_name());
+        crate::task_switch::yield_switch_entry();
+    }
 }
 
-#[cfg(not(feature = "async"))]
 #[cfg(feature = "irq")]
 pub fn schedule_timeout(deadline: axhal::time::TimeValue) -> bool {
     let curr = crate::current();
@@ -114,13 +119,11 @@ pub fn wakeup_task(task: AxTaskRef) {
     ManuallyDrop::into_inner(state);
 }
 
-#[cfg(not(feature = "async"))]
 pub fn schedule() {
     let next_task = current_processor().pick_next_task();
     switch_to(next_task);
 }
 
-#[cfg(not(feature = "async"))]
 fn switch_to(mut next_task: AxTaskRef) {
     let prev_task = crate::current();
 
@@ -171,8 +174,16 @@ fn switch_to(mut next_task: AxTaskRef) {
     next_task.set_preempt_pending(false);
 
     if prev_task.ptr_eq(&next_task) {
-        ManuallyDrop::into_inner(prev_state_lock);
-        return;
+        #[cfg(feature = "async")]
+        if next_task.is_idle() {
+            ManuallyDrop::into_inner(prev_state_lock);
+            return;
+        }
+        #[cfg(not(feature = "async"))]
+        {
+            ManuallyDrop::into_inner(prev_state_lock);
+            return;
+        }
     }
 
     // 当任务进行切换时，更新两个任务的时间统计信息
@@ -190,7 +201,9 @@ fn switch_to(mut next_task: AxTaskRef) {
     );
 
     unsafe {
+        #[cfg(not(feature = "async"))]
         let prev_ctx_ptr = prev_task.ctx_mut_ptr();
+        #[cfg(not(feature = "async"))]
         let next_ctx_ptr = next_task.ctx_mut_ptr();
 
         // The strong reference count of `prev_task` will be decremented by 1,
@@ -220,14 +233,18 @@ fn switch_to(mut next_task: AxTaskRef) {
 
         CurrentTask::set_current(prev_task, next_task);
 
+        #[cfg(not(feature = "async"))]
         axhal::arch::task_context_switch(&mut (*prev_ctx_ptr), &(*next_ctx_ptr));
+        #[cfg(feature = "async")]
+        crate::task_switch::run_next();
 
+        #[cfg(not(feature = "async"))]
         current_processor().switch_post();
     }
 }
 
 #[cfg(feature = "async")]
-pub(crate) async fn yield_current() {
+pub(crate) async fn async_yield_current() {
     let curr = crate::current();
     assert!(curr.is_runable());
     trace!("task yield: {}", curr.id_name());
@@ -249,7 +266,7 @@ pub(crate) async fn yield_helper() {
 
 #[cfg(feature = "async")]
 #[cfg(feature = "irq")]
-pub async fn schedule_timeout(deadline: axhal::time::TimeValue) -> bool {
+pub async fn async_schedule_timeout(deadline: axhal::time::TimeValue) -> bool {
     let curr = crate::current();
     debug!("task sleep: {}, deadline={:?}", curr.id_name(), deadline);
     assert!(!curr.is_idle());
