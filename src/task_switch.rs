@@ -2,20 +2,14 @@ use core::task::Poll;
 use crate::{current_processor, TaskState};
 
 #[cfg(feature = "preempt")]
-#[no_mangle]
-#[inline(never)]
 /// This is only used when the preempt feature is enabled.
-/// 
 pub fn preempt_switch_entry(taskctx: &mut taskctx::TaskContext) {
-    log::trace!("preempt_switch_entry, ctx_type {}", taskctx.ctx_type);
     let prev_task = crate::current();
     prev_task.set_ctx_ref(taskctx as _);
     let new_ctx = prepare_new_ctx();
     unsafe { taskctx::switch_to_ctx(new_ctx); }
 }
 
-#[no_mangle]
-#[inline(never)]
 /// This function is the entry of activitily switching.
 pub fn yield_switch_entry() {
     let prev_task = crate::current();
@@ -28,7 +22,6 @@ pub fn yield_switch_entry() {
     #[cfg(feature = "preempt")]
     prev_task.set_preempt_pending(false);
     let prev_task_ctx_ref = prev_task.get_ctx_ref();
-    // log::warn!("prev_task yield {} ctx_ref {:#X}", prev_task.id_name(), prev_task.get_ctx() as usize);
     let new_ctx = prepare_new_ctx();
     taskctx::yield_to_new_ctx(unsafe { &mut *prev_task_ctx_ref }, new_ctx);
     current_processor().set_curr_stack(None);
