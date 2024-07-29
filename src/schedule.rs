@@ -59,20 +59,13 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
 }
 
 pub(crate) fn yield_current() {
-    #[cfg(not(feature = "async"))]
-    {
-        let curr = crate::current();
-        assert!(curr.is_runable());
-        trace!("task yield: {}", curr.id_name());
-        schedule();
-    }
+    let curr = crate::current();
+    assert!(curr.is_runable());
+    trace!("task yield: {}", curr.id_name());
+    #[cfg(not(feature = "async"))]        
+    schedule();
     #[cfg(feature = "async")]
-    {
-        let curr = crate::current();
-        assert!(curr.is_runable());
-        trace!("task yield: {}", curr.id_name());
-        crate::task_switch::yield_switch_entry();
-    }
+    crate::task_switch::yield_switch_entry();
 }
 
 #[cfg(feature = "irq")]

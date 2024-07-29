@@ -215,7 +215,7 @@ pub fn run_idle() -> ! {
         #[cfg(not(feature = "async"))]
         yield_now();
         #[cfg(feature = "async")]
-        crate::task_switch::switch_entry();
+        crate::schedule();
         //debug!("idle task: waiting for IRQs...");
         #[cfg(feature = "irq")]
         axhal::arch::wait_for_irqs();
