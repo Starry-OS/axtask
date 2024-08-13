@@ -95,7 +95,8 @@ pub fn wakeup_task(task: AxTaskRef) {
             Processor::add_task(task.clone());
             return;
         }
-        _ => panic!("unexpect state when wakeup_task"),
+        _ => panic!("try to wakeup {:?} unexpect state {:?}",
+            task.id(), **state),
     }
     ManuallyDrop::into_inner(state);
 }
@@ -181,7 +182,6 @@ fn switch_to(mut next_task: AxTaskRef) {
         prev_task.id_name(),
         next_task.id_name(),
     );
-
     unsafe {
         let prev_ctx_ptr = prev_task.ctx_mut_ptr();
         let next_ctx_ptr = next_task.ctx_mut_ptr();

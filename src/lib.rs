@@ -56,6 +56,6 @@ cfg_if::cfg_if! {
 
     } else {
         mod api_s;
-        pub use self::api_s::{sleep, sleep_until, yield_now};
+        pub use self::api_s::*;
     }
 }

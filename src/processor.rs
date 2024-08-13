@@ -235,6 +235,7 @@ fn gc_entry() {
 
 pub(crate) fn init() {
     const IDLE_TASK_STACK_SIZE: usize = 4096;
+
     let idle_task = new_task(
         || crate::run_idle(),
         "idle".into(), // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程

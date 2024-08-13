@@ -14,7 +14,7 @@ keywords = ["Starry"]
 default = []
 
 multitask = [
-    "dep:axconfig", "dep:percpu", "dep:spinlock", "dep:lazy_init", "dep:memory_addr",
+    "dep:percpu", "dep:spinlock", "dep:lazy_init", "dep:memory_addr",
     "dep:scheduler", "dep:timer_list", "kernel_guard","taskctx/multitask"
 ]
 irq = []
@@ -35,7 +35,7 @@ log = "0.4"
 numeric-enum-macro = { git = "https://github.com/mexus/numeric-enum-macro" }
 axhal = { git = "https://github.com/Starry-OS/axhal.git" }
 axsignal = { git = "https://github.com/Starry-OS/axsignal.git" }
-axconfig = { git = "https://github.com/Starry-OS/axconfig.git", optional = true }
+axconfig = { git = "https://github.com/Starry-OS/axconfig.git"}
 percpu = { git = "https://github.com/Starry-OS/percpu.git", optional = true }
 spinlock = { git = "https://github.com/Starry-OS/spinlock.git", optional = true }
 lazy_init = { git = "https://github.com/Starry-OS/lazy_init.git", optional = true }
@@ -46,6 +46,7 @@ kernel_guard = { git = "https://github.com/Starry-OS/kernel_guard.git", optional
 taskctx = { git = "https://github.com/Starry-OS/taskctx.git" }
 axlog = { git = "https://github.com/Starry-OS/axlog.git" }
 linked_list = { git = "https://github.com/Starry-OS/linked_list.git" }
+axbacktrace = { path = "../axbacktrace"}
 
 [dev-dependencies]
 rand = "0.8"

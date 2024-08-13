@@ -212,3 +212,27 @@ pub fn run_idle() -> ! {
         axhal::arch::wait_for_irqs();
     }
 }
+
+pub fn dump_curr_backtrace() {
+    dump_task_backtrace(current().as_task_ref().clone());
+}
+pub fn dump_task_backtrace(task: AxTaskRef) {
+    use axbacktrace::{dump_backtrace, Unwind, UnwindIf, StackInfo};
+
+    let stack_low = task.get_kernel_stack_down().unwrap();
+    let stack_high = task.get_kernel_stack_top().unwrap();
+    info!("dump task: {}, stack range: {:#016x}: {:#016x}", 
+        task.id_name(), stack_low, stack_high);
+    let stack_info = StackInfo::new(stack_low,stack_high);
+
+    //Init Unwind instance from current context
+    let curr = crate::current();
+    let mut unwind = if curr.ptr_eq(&task) {
+        Unwind::new_from_cur_ctx(stack_info)
+    } else {
+        let (pc, fp) = task.ctx_unwind();
+        Unwind::new(pc,fp,stack_info)
+    };
+    // dump current task trace
+    dump_backtrace(&mut unwind);
+}
