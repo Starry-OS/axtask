@@ -45,7 +45,7 @@ cfg_if::cfg_if! {
 
         pub use wait_list::{WaitTaskList, WaitTaskNode};
         pub use crate::task::TaskState;
-        pub use taskctx::{SchedPolicy, SchedStatus};
+        pub use taskctx::{SchedPolicy, SchedStatus, MAX_RT_PRIO};
 
         #[cfg(feature = "irq")]
         mod timers;
