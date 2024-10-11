@@ -5,7 +5,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_init::LazyInit;
 use scheduler::BaseScheduler;
-use spinlock::{SpinNoIrq, SpinNoIrqOnly,SpinRaw};
+use spinlock::{SpinNoIrq, SpinRaw};
 use kernel_guard::BaseGuard;
 use kernel_guard::NoOp;
 use axhal::cpu::this_cpu_id;
@@ -130,12 +130,6 @@ impl Processor {
     fn clean(&mut self) {
         self.exited_tasks.lock().clear()
     }
-
-    #[inline]
-    /// Processor Clean all
-    pub fn clean_all() {
-    }
-
 }
 
 fn get_processor(index: usize) -> &'static mut Processor{
@@ -215,6 +209,7 @@ impl<'a, G: BaseGuard> AxProcessorRef<'a, G> {
     #[inline]
     /// gc init
     fn gc_init(&mut self) {
+        self.inner.gc_task.set_cpumask(CpuMask::one_shot(this_cpu_id()));
         self.add_task(self.inner.gc_task.clone());
     }
 
@@ -291,7 +286,7 @@ impl<'a, G: BaseGuard> AxProcessorRef<'a, G> {
 
         self.kick_exited_task(curr.as_task_ref());
         if curr.is_init() {
-            Processor::clean_all();
+            self.inner.clean();
             axhal::misc::terminate();
         } else {
             curr.set_exit_code(exit_code);

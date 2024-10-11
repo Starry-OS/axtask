@@ -79,9 +79,8 @@ pub fn on_timer_tick() {
 /// disable_preempt ctx
 pub fn current_check_preempt_pending() {
     let curr = crate::current();
-    // if task is already exited or blocking,
-    // no need preempt, they are rescheduling
-    if curr.get_preempt_pending() && curr.can_preempt() && !curr.is_exited() && !curr.is_blocking()
+
+    if curr.get_preempt_pending() && curr.can_preempt() && !curr.is_blocked()
     {
         debug!(
             "current {} is to be preempted , allow {}",
