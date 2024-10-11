@@ -53,8 +53,6 @@ pub struct Processor {
     scheduler: SpinRaw<Scheduler>,
     /// The exited task-queue of the current processor
     exited_tasks: SpinRaw<VecDeque<AxTaskRef>>,
-    /// Pre save ctx when processor switch ctx
-    prev_ctx_save: PrevCtxSave,
     /// GC wait or notify use
     gc_wait: WaitQueue,
     /// The idle task of the processor
@@ -81,7 +79,6 @@ impl Processor {
         Processor {
             scheduler: SpinRaw::new(Scheduler::new()),
             idle_task,
-            prev_ctx_save: PrevCtxSave::new_empty(),
             exited_tasks: SpinRaw::new(VecDeque::new()),
             gc_wait: WaitQueue::new(),
             gc_task: gc_task,
@@ -99,8 +96,6 @@ impl Processor {
             .unwrap_or_else(|| self.idle_task.clone())
     }
 
-    #[inline]
-    /// Add curr task to Processor, it ususally add to back
     pub(crate) fn put_prev_task(&mut self, task: AxTaskRef, front: bool) {
         self.scheduler.lock().put_prev_task(task, front);
     }
@@ -117,13 +112,6 @@ impl Processor {
     pub(crate) fn set_priority(&mut self, task: &AxTaskRef, prio: isize) -> bool {
         self.scheduler.lock().set_priority(task, prio)
     }
-
-    #[inline]
-    /// update prev_ctx_save when ctx_switch
-    pub(crate) fn set_prev_ctx_save(&mut self, prev_save: PrevCtxSave) {
-        self.prev_ctx_save = prev_save;
-    }
-
 
     #[inline]
     /// Processor Clean
@@ -213,13 +201,10 @@ impl<'a, G: BaseGuard> AxProcessorRef<'a, G> {
         self.add_task(self.inner.gc_task.clone());
     }
 
-    #[inline]
-    /// post process prev_ctx_save
+    /// post switch
     pub(crate) fn switch_post(&mut self) {
-        if let Some(prev_task) = self.inner.prev_ctx_save.take_prev_task() {
-            prev_task.set_on_cpu(false);
-        } else {
-            panic!("no prev task");
+        unsafe {
+            crate::current().clear_prev_task_on_cpu();
         }
     }
 
@@ -313,9 +298,10 @@ impl<'a, G: BaseGuard> AxProcessorRef<'a, G> {
 
     fn switch_to(&mut self, prev_task: CurrentTask, next_task: AxTaskRef) {
         // task in a disable_preempt context? it not allowed ctx switch
+        // switch to happend in current_processor::<NoPreemptIrq>
         #[cfg(feature = "preempt")]
         assert!(
-            prev_task.can_preempt(),
+            prev_task.preempt_num() == 1 ,
             "task can_preempt failed {}",
             prev_task.id_name()
         );
@@ -342,9 +328,9 @@ impl<'a, G: BaseGuard> AxProcessorRef<'a, G> {
     
         // Claim the task as running, we do this before switching to it
         // such that any running task will have this set.
-        #[cfg(feature = "smp")]
         next_task.set_on_cpu(true);
     
+
         trace!(
             "context switch: {} -> {}",
             prev_task.id_name(),
@@ -372,10 +358,8 @@ impl<'a, G: BaseGuard> AxProcessorRef<'a, G> {
                 }
             }
     
-            self.inner.set_prev_ctx_save(
-                PrevCtxSave::new(prev_task.clone())
-            );
-    
+            // Store the weak pointer of **prev_task** in **next_task**'s struct.
+            next_task.set_prev_task(prev_task.clone());
             CurrentTask::set_current(prev_task, next_task);
     
             axhal::arch::task_context_switch(&mut (*prev_ctx_ptr), &(*next_ctx_ptr));

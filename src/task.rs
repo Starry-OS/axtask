@@ -3,6 +3,9 @@ use alloc::{string::String, sync::Arc};
 use core::{mem::ManuallyDrop, ops::Deref};
 
 use alloc::boxed::Box;
+use core::cell::UnsafeCell;
+
+use alloc::sync::Weak;
 
 use kernel_guard::NoPreemptIrqSave;
 use memory_addr::VirtAddr;
@@ -19,7 +22,7 @@ use crate::{
 
 pub use taskctx::{TaskId, TaskInner};
 
-use spinlock::{SpinNoIrq, SpinNoIrqOnly, SpinNoIrqOnlyGuard};
+use spinlock::SpinNoIrq;
 use core::sync::atomic::{AtomicU8, AtomicBool, Ordering};
 
 extern "C" {
@@ -64,7 +67,13 @@ pub struct ScheduleTask {
     on_cpu: AtomicBool,
     /// CPU affinity mask
     cpumask: SpinNoIrq<CpuMask>,
+
+    /// A weak reference to the previous task running on this CPU.
+    prev_task: UnsafeCell<Weak<AxTask>>,
 }
+
+unsafe impl Send for ScheduleTask {}
+unsafe impl Sync for ScheduleTask {}
 
 impl ScheduleTask {
     fn new(inner: TaskInner, on_cpu: bool, cpu_mask: CpuMask) -> Self {
@@ -74,6 +83,7 @@ impl ScheduleTask {
             on_cpu: AtomicBool::new(on_cpu),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpu_mask),
+            prev_task: UnsafeCell::new(Weak::default()),
         }
     }
 
@@ -110,6 +120,24 @@ impl ScheduleTask {
     #[inline]
     pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
         self.on_cpu.store(on_cpu, Ordering::Release);
+    }
+
+    /// Stores a weak reference to the previous task running on this CPU.
+    ///
+    /// ## Safety
+    /// This function is only called by current task in `switch_to`.
+    pub unsafe fn set_prev_task(&self, prev_task: Arc<AxTask>) {
+        *self.prev_task.get() = Arc::downgrade(&prev_task);
+    }
+
+     pub unsafe fn clear_prev_task_on_cpu(&self) {
+        self.prev_task
+            .get()
+            .as_ref()
+            .expect("Invalid prev_task pointer")
+            .upgrade()
+            .expect("prev_task is dropped")
+            .set_on_cpu(false);
     }
 
     /// Whether the task is Exited
