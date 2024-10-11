@@ -2,8 +2,7 @@ use alloc::sync::Arc;
 use core::ops::Deref;
 use crate::AxTaskRef;
 use crate::task::TaskState;
-use crate::schedule::wakeup_task;
-
+use crate::wakeup_task;
 use linked_list::{GetLinks, Links, List};
 
 /// A task wrapper.
@@ -64,7 +63,7 @@ impl WaitTaskList {
 
     /// add wait to list back
     pub fn prepare_to_wait(&mut self, task: Arc<WaitTaskNode>) {
-        task.inner().set_state(TaskState::Blocking);
+        task.inner().set_state(TaskState::Blocked);
         self.list.push_back(task);
     }
 

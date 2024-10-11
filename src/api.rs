@@ -3,21 +3,16 @@
 use alloc::{string::String, sync::Arc};
 #[cfg(feature = "monolithic")]
 use axhal::KERNEL_PROCESS_ID;
-
+use kernel_guard::NoPreemptIrqSave;
 use crate::task::{ScheduleTask, TaskState};
 
-use crate::schedule::get_wait_for_exit_queue;
+use crate::processor::select_processor;
+use crate::processor::get_wait_for_exit_queue;
 #[doc(cfg(feature = "multitask"))]
 pub use crate::task::{new_task, CurrentTask, TaskId};
 #[doc(cfg(feature = "multitask"))]
 pub use crate::wait_queue::WaitQueue;
-
-pub use crate::processor::{current_processor, Processor};
-
-pub use crate::schedule::schedule;
-
-#[cfg(feature = "irq")]
-pub use crate::schedule::schedule_timeout;
+pub use crate::processor::current_processor;
 
 /// The reference type of a task.
 pub type AxTaskRef = Arc<AxTask>;
@@ -75,7 +70,7 @@ pub fn init_scheduler_secondary() {
 #[doc(cfg(feature = "irq"))]
 pub fn on_timer_tick() {
     crate::timers::check_events();
-    crate::schedule::scheduler_timer_tick();
+    current_processor::<NoPreemptIrqSave>().scheduler_timer_tick();
 }
 
 #[cfg(feature = "preempt")]
@@ -93,7 +88,7 @@ pub fn current_check_preempt_pending() {
             curr.id_name(),
             curr.can_preempt()
         );
-        crate::schedule::schedule()
+        current_processor::<NoPreemptIrqSave>().reschedule();
     }
 }
 
@@ -113,7 +108,7 @@ where
         #[cfg(feature = "monolithic")]
         0,
     );
-    Processor::first_add_task(task.clone());
+    select_processor::<NoPreemptIrqSave>(&task).add_task(task.clone());
     task
 }
 
@@ -140,13 +135,13 @@ where
 ///
 /// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
 pub fn set_priority(prio: isize) -> bool {
-    crate::schedule::set_current_priority(prio)
+    current_processor::<NoPreemptIrqSave>().set_current_priority(prio)
 }
 
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
 pub fn yield_now() {
-    crate::schedule::yield_current();
+    current_processor::<NoPreemptIrqSave>().yield_current();
 }
 
 /// Current task is going to sleep for the given duration.
@@ -161,13 +156,13 @@ pub fn sleep(dur: core::time::Duration) {
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
 pub fn sleep_until(deadline: axhal::time::TimeValue) {
     #[cfg(feature = "irq")]
-    crate::schedule::schedule_timeout(deadline);
+    current_processor::<NoPreemptIrqSave>().schedule_timeout(deadline);
     #[cfg(not(feature = "irq"))]
     axhal::time::busy_wait_until(deadline);
 }
 /// wake up task
 pub fn wakeup_task(task: AxTaskRef) {
-    crate::schedule::wakeup_task(task)
+    current_processor::<NoPreemptIrqSave>().wakeup_task(task);
 }
 
 /// Current task is going to sleep, it will be woken up when the given task exits.
@@ -198,8 +193,11 @@ pub fn wake_vfork_process(task: &AxTaskRef) {
 
 /// Exits the current task.
 pub fn exit(exit_code: i32) -> ! {
-    crate::schedule::exit_current(exit_code)
+    current_processor::<NoPreemptIrqSave>().exit_current(exit_code);
 }
+
+/// The wrapper type for cpumask::CpuMask with SMP configuration.
+pub type CpuMask = cpumask::CpuMask<{ axconfig::SMP }>;
 
 /// The idle task routine.
 ///

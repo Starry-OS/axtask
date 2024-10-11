@@ -4,19 +4,23 @@ use core::{mem::ManuallyDrop, ops::Deref};
 
 use alloc::boxed::Box;
 
+use kernel_guard::NoPreemptIrqSave;
 use memory_addr::VirtAddr;
 
 #[cfg(feature = "monolithic")]
 use axhal::arch::TrapFrame;
 
 use crate::{
-    current_processor, processor::Processor, schedule::add_wait_for_exit_queue, AxTask, AxTaskRef,
+    processor::{add_wait_for_exit_queue,current_processor},
+    AxTask,
+    AxTaskRef,
+    CpuMask,
 };
 
 pub use taskctx::{TaskId, TaskInner};
 
 use spinlock::{SpinNoIrq, SpinNoIrqOnly, SpinNoIrqOnlyGuard};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicBool, Ordering};
 
 extern "C" {
     fn _stdata();
@@ -35,100 +39,104 @@ pub(crate) fn tls_area() -> (usize, usize) {
 #[allow(missing_docs)]
 pub enum TaskState {
     Runable = 1,
-    Blocking = 2,
-    Blocked = 3,
-    Exited = 4,
+    Blocked = 2,
+    Exited = 3,
+}
+
+
+impl From<u8> for TaskState {
+      #[inline]
+      fn from(state: u8) -> Self {
+          match state {
+              1 => Self::Runable,
+              2 => Self::Blocked,
+              3 => Self::Exited,
+              _ => unreachable!(),
+          }
+      }
 }
 
 pub struct ScheduleTask {
     inner: TaskInner,
-    /// Store task irq state
-    irq_state: AtomicBool,
     /// Task state
-    state: SpinNoIrqOnly<TaskState>,
-    /// Task own which Processor
-    processor: SpinNoIrq<Option<&'static Processor>>,
+    state: AtomicU8,
+    /// On-Cpu flag
+    on_cpu: AtomicBool,
+    /// CPU affinity mask
+    cpumask: SpinNoIrq<CpuMask>,
 }
 
 impl ScheduleTask {
-    fn new(inner: TaskInner, irq_init_state: bool) -> Self {
+    fn new(inner: TaskInner, on_cpu: bool, cpu_mask: CpuMask) -> Self {
         Self {
-            state: SpinNoIrqOnly::new(TaskState::Runable),
-            processor: SpinNoIrq::new(None),
-            irq_state: AtomicBool::new(irq_init_state),
+            state: AtomicU8::new(TaskState::Runable as u8),
             inner: inner,
+            on_cpu: AtomicBool::new(on_cpu),
+            // By default, the task is allowed to run on all CPUs.
+            cpumask: SpinNoIrq::new(cpu_mask),
         }
     }
 
     #[inline]
-    /// lock the task state and ctx_ptr access
-    pub fn state_lock_manual(&self) -> ManuallyDrop<SpinNoIrqOnlyGuard<TaskState>> {
-        ManuallyDrop::new(self.state.lock())
+    pub(crate) fn state(&self) -> TaskState {
+       self.state.load(Ordering::Acquire).into()
+    }
+
+    /// Transition the task state from `current_state` to `new_state`,
+    /// Returns `true` if the current state is `current_state` and the state is successfully set to `new_state`,
+    /// otherwise returns `false`.
+    #[inline]
+    pub(crate) fn transition_state(&self, current_state: TaskState, new_state: TaskState) -> bool {
+        self.state
+            .compare_exchange(
+                current_state as u8,
+                new_state as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     #[inline]
-    /// set the state of the task
-    pub fn state(&self) -> TaskState {
-        *self.state.lock()
+    pub(crate) fn set_state(&self, state: TaskState) {
+        self.state.store(state as u8, Ordering::Release)
     }
 
     #[inline]
-    /// set the state of the task
-    pub fn set_state(&self, state: TaskState) {
-        *self.state.lock() = state
+    pub(crate) fn on_cpu(&self) -> bool {
+        self.on_cpu.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
+        self.on_cpu.store(on_cpu, Ordering::Release);
     }
 
     /// Whether the task is Exited
     #[inline]
     pub fn is_exited(&self) -> bool {
-        matches!(*self.state.lock(), TaskState::Exited)
+        matches!(self.state(), TaskState::Exited)
     }
 
-    /// Whether the task is runnalbe
     #[inline]
     pub fn is_runable(&self) -> bool {
-        matches!(*self.state.lock(), TaskState::Runable)
-    }
-
-    /// Whether the task is blocking
-    #[inline]
-    pub fn is_blocking(&self) -> bool {
-        matches!(*self.state.lock(), TaskState::Blocking)
+        matches!(self.state(), TaskState::Runable)
     }
 
     /// Whether the task is blocked
     #[inline]
     pub fn is_blocked(&self) -> bool {
-        matches!(*self.state.lock(), TaskState::Blocked)
+        matches!(self.state(), TaskState::Blocked)
     }
 
-    /// Whether the task is blocked
     #[inline]
-    pub(crate) fn init_processor(&self, p: &'static Processor) {
-        *self.processor.lock() = Some(p);
+    pub(crate) fn cpumask(&self) -> CpuMask {
+        *self.cpumask.lock()
     }
 
-    /// Whether the task is blocked
     #[inline]
-    pub(crate) fn get_processor(&self) -> &'static Processor {
-        self.processor
-            .lock()
-            .as_ref()
-            .expect("task {} processor not init")
-    }
-
-    /// set irq state
-    #[cfg(feature = "irq")]
-    #[inline]
-    pub(crate) fn set_irq_state(&self, irq_state: bool) {
-        self.irq_state.store(irq_state,Ordering::Relaxed);
-    }
-
-    /// get irq state
-    #[cfg(feature = "irq")]
-    #[inline]
-    pub(crate) fn get_irq_state(&self) -> bool {
-        self.irq_state.load(Ordering::Relaxed)
+    pub(crate) fn set_cpumask(&self, cpumask: CpuMask) {
+        *self.cpumask.lock() = cpumask
     }
 }
 
@@ -185,13 +193,11 @@ where
         tls,
     );
 
-    // 设置 CPU 亲和集
-    task.set_cpu_set((1 << axconfig::SMP) - 1, 1, axconfig::SMP);
-
     task.reset_time_stat(current_time_nanos() as usize);
 
     // a new task start, irq should be enabled by default
-    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task,true)));
+    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task, false,CpuMask::full())));
+
     add_wait_for_exit_queue(&axtask);
     axtask
 }
@@ -225,7 +231,8 @@ where
         tls,
     );
     // a new task start, irq should be enabled by default
-    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task, true)));
+    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task, false,
+                CpuMask::full())));
     add_wait_for_exit_queue(&axtask);
     axtask
 }
@@ -239,12 +246,9 @@ pub(crate) fn new_init_task(name: String) -> AxTaskRef {
             #[cfg(feature = "tls")]
             tls_area(),
         ),
-        false,
+        true,
+        CpuMask::full()
     )));
-
-    #[cfg(feature = "monolithic")]
-    // 设置 CPU 亲和集
-    axtask.set_cpu_set((1 << axconfig::SMP) - 1, 1, axconfig::SMP);
 
     add_wait_for_exit_queue(&axtask);
     axtask
@@ -306,7 +310,10 @@ extern "C" fn task_entry() -> ! {
     // SAFETY: INIT when switch_to
     // First into task entry, manually perform the subsequent work of switch_to
     
-    current_processor().switch_post();
+    current_processor::<NoPreemptIrqSave>().switch_post();
+
+    #[cfg(feature = "irq")]
+    axhal::arch::enable_irqs(); 
 
     let task = crate::current();
     if let Some(entry) = task.get_entry() {

@@ -38,7 +38,6 @@ cfg_if::cfg_if! {
         mod processor;
         mod task;
 
-        mod schedule;
         mod api;
         mod wait_list;
         mod wait_queue;
