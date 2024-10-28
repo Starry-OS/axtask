@@ -15,7 +15,7 @@ default = []
 
 multitask = [
     "dep:percpu", "dep:spinlock", "dep:lazy_init", "dep:memory_addr",
-    "dep:scheduler", "dep:timer_list", "kernel_guard","taskctx/multitask"
+    "dep:scheduler", "dep:timer_list", "kernel_guard","taskctx/multitask","dep:cpumask"
 ]
 irq = []
 tls = ["axhal/tls", "taskctx/tls"]
@@ -47,6 +47,7 @@ taskctx = { git = "https://github.com/Starry-OS/taskctx.git" }
 axlog = { git = "https://github.com/Starry-OS/axlog.git" }
 linked_list = { git = "https://github.com/Starry-OS/linked_list.git" }
 axbacktrace = { git = "https://github.com/kern-crates/axbacktrace.git" }
+cpumask = { git = "https://github.com/arceos-org/cpumask.git", optional = true }
 
 [dev-dependencies]
 rand = "0.8"

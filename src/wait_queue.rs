@@ -1,11 +1,10 @@
-#[cfg(feature = "irq")]
-use crate::schedule::schedule_timeout;
-use crate::schedule::schedule;
 use spinlock::SpinNoIrq;
 use crate::wait_list::WaitTaskList;
 use crate::wait_list::WaitTaskNode;
 use crate::AxTaskRef;
 use alloc::sync::Arc;
+use crate::processor::current_processor;
+use kernel_guard::NoPreemptIrqSave;
 /// A queue to store sleeping tasks.
 ///
 /// # Examples
@@ -73,7 +72,7 @@ impl WaitQueue {
     pub fn wait(&self) {
         declare_wait!(waiter);
         self.queue.lock().prepare_to_wait(waiter.clone());
-        schedule();
+        current_processor::<NoPreemptIrqSave>().reschedule();
 
         // maybe wakeup by signal or others, try to delete again
         // 1. starry support UNINTERRUPT mask, no need to check
@@ -98,7 +97,7 @@ impl WaitQueue {
             // maybe wakeup by signal or others, should check before push
             // wait_list will do check
             self.queue.lock().prepare_to_wait(waiter.clone());
-            schedule();
+            current_processor::<NoPreemptIrqSave>().reschedule();
         }
 
         //maybe wakeup by signal or others, try to delete again
@@ -113,7 +112,7 @@ impl WaitQueue {
         let deadline = axhal::time::current_time() + dur;
 
         self.queue.lock().prepare_to_wait(waiter.clone());
-        let timeout = schedule_timeout(deadline);
+        let timeout = current_processor::<NoPreemptIrqSave>().schedule_timeout(deadline);
 
         //maybe wakeup by timer or signal, try to delete again
         self.queue.lock().remove(&waiter);
@@ -139,7 +138,7 @@ impl WaitQueue {
             }
             //maybe wakeup by signal or others, should check before push
             self.queue.lock().prepare_to_wait(waiter.clone());
-            timeout = schedule_timeout(deadline);
+            timeout = current_processor::<NoPreemptIrqSave>().schedule_timeout(deadline);
             if timeout {
                 break;
             }
